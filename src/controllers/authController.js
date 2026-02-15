@@ -154,3 +154,48 @@ exports.updateProfile = async (req, res) => {
     res.status(500).json({ success: false, message: error.message });
   }
 };
+
+// ── SWITCH ROLE ───────────────────────────────────────────────────────────────
+exports.switchRole = async (req, res) => {
+  try {
+    const { role } = req.body;
+    if (!['user', 'provider'].includes(role)) {
+      return res.status(400).json({ success: false, message: 'Invalid role' });
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { role },
+      { new: true }
+    );
+
+    // If switching to provider, check if provider profile exists
+    if (role === 'provider') {
+      const Provider = require('../models/Provider');
+      const providerProfile = await Provider.findOne({ user: req.user.id });
+      if (!providerProfile) {
+        return res.status(400).json({
+          success: false,
+          message: 'No provider profile found. Please register as a provider first.',
+          needsProviderSetup: true,
+        });
+      }
+    }
+
+    const userData = {
+      _id:          user._id,
+      name:         user.name,
+      email:        user.email,
+      phone:        user.phone,
+      role:         user.role,
+      profileImage: user.profileImage || null,
+      address:      user.address || {},
+    };
+
+    console.log(`✅ ${user.email} switched to ${role}`);
+    res.json({ success: true, message: `Switched to ${role} mode`, data: userData });
+  } catch (error) {
+    console.error('Switch role error:', error.message);
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
