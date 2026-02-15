@@ -1,25 +1,26 @@
 // backend/src/controllers/requestController.js
 const Request  = require('../models/Request');
 const Provider = require('../models/Provider');
-const User     = require('../models/User');
 
-// ── Notify nearby providers via Socket.IO ─────────────────────────────────────
+// ── Safe statusHistory push helper ────────────────────────────────────────────
+const pushStatus = (request, status, message) => {
+  if (!Array.isArray(request.statusHistory)) request.statusHistory = [];
+  request.statusHistory.push({ status, message, timestamp: new Date() });
+};
+
+// ── Notify nearby providers ───────────────────────────────────────────────────
 const notifyNearbyProviders = async (request, io) => {
   try {
     const [lng, lat] = request.location.coordinates;
-    const providers  = await Provider.find({
+    if (!lng && !lat) return;
+
+    const providers = await Provider.find({
       isAvailable: true,
       category:    request.category,
       _id:         { $nin: request.rejectedBy || [] },
-      location: {
-        $near: {
-          $geometry:    { type: 'Point', coordinates: [lng, lat] },
-          $maxDistance: 20000, // 20km
-        },
-      },
     }).populate('user', 'name').limit(10);
 
-    console.log(`📢 Notifying ${providers.length} providers for request: ${request._id}`);
+    console.log(`📢 Notifying ${providers.length} providers`);
 
     providers.forEach(provider => {
       io.to(`provider_${provider._id}`).emit('new-request', {
@@ -28,12 +29,11 @@ const notifyNearbyProviders = async (request, io) => {
         category:    request.category,
         description: request.description,
         budget:      request.budget,
-        address:     request.location.address,
+        address:     request.location?.address || '',
         userName:    request.user?.name || 'User',
       });
     });
 
-    // Update notified list
     await Request.findByIdAndUpdate(request._id, {
       $addToSet: { notifiedProviders: { $each: providers.map(p => p._id) } },
     });
@@ -47,7 +47,7 @@ exports.createRequest = async (req, res) => {
   try {
     const { title, description, category, budget, latitude, longitude, address } = req.body;
     if (!title || !description || !category) {
-      return res.status(400).json({ success: false, message: 'Title, description and category are required' });
+      return res.status(400).json({ success: false, message: 'Title, description and category required' });
     }
 
     const request = await Request.create({
@@ -63,8 +63,6 @@ exports.createRequest = async (req, res) => {
     });
 
     await request.populate('user', 'name email phone');
-
-    // Notify nearby providers
     const io = req.app.get('io');
     if (io) notifyNearbyProviders(request, io);
 
@@ -87,15 +85,15 @@ exports.getMyRequests = async (req, res) => {
   }
 };
 
-// ── GET PROVIDER REQUESTS (Provider sees nearby requests) ─────────────────────
+// ── GET PROVIDER REQUESTS ─────────────────────────────────────────────────────
 exports.getProviderRequests = async (req, res) => {
   try {
     const provider = await Provider.findOne({ user: req.user.id });
     if (!provider) return res.status(404).json({ success: false, message: 'Provider profile not found' });
 
     const requests = await Request.find({
-      category: provider.category,
-      status:   'pending',
+      category:   provider.category,
+      status:     'pending',
       rejectedBy: { $ne: provider._id },
     })
     .populate('user', 'name phone')
@@ -114,39 +112,36 @@ exports.makeOffer = async (req, res) => {
     const { price, message } = req.body;
     const request = await Request.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
-    if (request.status !== 'pending') return res.status(400).json({ success: false, message: 'Request is no longer available' });
+    if (request.status !== 'pending') return res.status(400).json({ success: false, message: 'Request no longer available' });
 
     const provider = await Provider.findOne({ user: req.user.id });
     if (!provider) return res.status(404).json({ success: false, message: 'Provider profile not found' });
 
-    // Check if already made offer
-    const existing = request.offers.find(o => o.provider.toString() === provider._id.toString());
+    const existing = request.offers?.find(o => o.provider?.toString() === provider._id.toString());
     if (existing) return res.status(400).json({ success: false, message: 'You already made an offer' });
 
+    if (!Array.isArray(request.offers)) request.offers = [];
     request.offers.push({ provider: provider._id, price, message });
     await request.save();
     await request.populate('offers.provider');
 
-    // Notify user about new offer
     const io = req.app.get('io');
     if (io) {
       io.to(`user_${request.user}`).emit('new-offer', {
         requestId:    request._id,
         requestTitle: request.title,
         providerName: provider.user?.name || 'A Provider',
-        price,
-        message,
-        offerId:      request.offers[request.offers.length - 1]._id,
+        price, message,
       });
     }
 
-    res.json({ success: true, message: 'Offer sent successfully', data: request });
+    res.json({ success: true, message: 'Offer sent!', data: request });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ── USER: ACCEPT OFFER → moves to payment_pending ────────────────────────────
+// ── USER: ACCEPT OFFER ────────────────────────────────────────────────────────
 exports.acceptOffer = async (req, res) => {
   try {
     const { offerId } = req.body;
@@ -154,46 +149,42 @@ exports.acceptOffer = async (req, res) => {
     if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
     if (request.user.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized' });
 
-    const offer = request.offers.id(offerId);
+    const offer = request.offers?.id(offerId);
     if (!offer) return res.status(404).json({ success: false, message: 'Offer not found' });
 
-    // Accept this offer
-    offer.status            = 'accepted';
-    request.acceptedOffer   = offerId;
-    request.assignedProvider= offer.provider;
-    request.finalAmount     = offer.price;
-    request.status          = 'payment_pending';
-    request.statusHistory.push({
-      status:  'payment_pending',
-      message: 'Offer accepted. Please complete payment to confirm booking.',
-    });
+    offer.status             = 'accepted';
+    request.acceptedOffer    = offerId;
+    request.assignedProvider = offer.provider;
+    request.finalAmount      = offer.price;
+    request.status           = 'payment_pending';
 
-    // Reject all other offers
+    // Safe push
+    pushStatus(request, 'payment_pending', 'Offer accepted. Please complete payment.');
+
+    // Reject other offers
     request.offers.forEach(o => {
       if (o._id.toString() !== offerId) o.status = 'rejected';
     });
 
     await request.save();
 
-    // Notify provider that offer was accepted
     const io = req.app.get('io');
     if (io) {
       io.to(`provider_${offer.provider}`).emit('offer-accepted', {
         requestId:    request._id,
         requestTitle: request.title,
-        message:      'Your offer was accepted! Waiting for user payment.',
+        message:      'Your offer was accepted! Waiting for payment.',
+      });
+      io.to(`user_${request.user}`).emit('request-status-update', {
+        requestId: request._id,
+        status:    'payment_pending',
+        message:   'Offer accepted! Please complete payment.',
       });
     }
 
-    // Notify user to pay
-    io.to(`user_${request.user}`).emit('request-status-update', {
-      requestId: request._id,
-      status:    'payment_pending',
-      message:   'Offer accepted! Please complete payment to confirm.',
-    });
-
-    res.json({ success: true, message: 'Offer accepted. Please complete payment.', data: request });
+    res.json({ success: true, message: 'Offer accepted. Please pay.', data: request });
   } catch (error) {
+    console.error('Accept offer error:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -207,17 +198,15 @@ exports.rejectRequest = async (req, res) => {
     const provider = await Provider.findOne({ user: req.user.id });
     if (!provider) return res.status(404).json({ success: false, message: 'Provider not found' });
 
-    // Add to rejected list
     await Request.findByIdAndUpdate(req.params.id, {
       $addToSet: { rejectedBy: provider._id },
     });
 
-    // Notify next available provider
-    const updatedRequest = await Request.findById(req.params.id).populate('user', 'name');
+    const updated = await Request.findById(req.params.id).populate('user', 'name');
     const io = req.app.get('io');
-    if (io) notifyNearbyProviders(updatedRequest, io);
+    if (io) notifyNearbyProviders(updated, io);
 
-    res.json({ success: true, message: 'Request rejected. Passed to next provider.' });
+    res.json({ success: true, message: 'Request skipped.' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
@@ -235,32 +224,28 @@ exports.confirmPayment = async (req, res) => {
     request.status        = 'active';
     request.paymentStatus = 'paid';
     request.paymentId     = paymentId || 'MANUAL_' + Date.now();
-    request.statusHistory.push({
-      status:  'active',
-      message: 'Payment confirmed! Provider is on the way.',
-    });
+
+    pushStatus(request, 'active', 'Payment confirmed! Provider is on the way.');
     await request.save();
 
-    // Notify provider to start work
     const io = req.app.get('io');
     if (io) {
       io.to(`provider_${request.assignedProvider}`).emit('payment-confirmed', {
         requestId:    request._id,
         requestTitle: request.title,
         message:      '💰 Payment received! Please start the service.',
-        userAddress:  request.location.address,
+        userAddress:  request.location?.address || '',
       });
-
-      // Notify user
       io.to(`user_${request.user}`).emit('request-status-update', {
         requestId: request._id,
         status:    'active',
-        message:   '✅ Payment confirmed! Provider is coming to you.',
+        message:   '✅ Payment confirmed! Provider is coming.',
       });
     }
 
-    res.json({ success: true, message: 'Payment confirmed! Service is now active.', data: request });
+    res.json({ success: true, message: 'Payment confirmed! Service is active.', data: request });
   } catch (error) {
+    console.error('Payment error:', error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -273,7 +258,7 @@ exports.markCompleted = async (req, res) => {
 
     const provider = await Provider.findOne({ user: req.user.id });
     if (!provider) return res.status(404).json({ success: false, message: 'Provider not found' });
-    if (request.assignedProvider.toString() !== provider._id.toString()) {
+    if (request.assignedProvider?.toString() !== provider._id.toString()) {
       return res.status(403).json({ success: false, message: 'Not authorized' });
     }
     if (request.status !== 'active') {
@@ -282,18 +267,11 @@ exports.markCompleted = async (req, res) => {
 
     request.status      = 'completed';
     request.completedAt = new Date();
-    request.statusHistory.push({
-      status:  'completed',
-      message: 'Service completed by provider.',
-    });
+    pushStatus(request, 'completed', 'Service completed by provider.');
     await request.save();
 
-    // Update provider stats
-    await Provider.findByIdAndUpdate(provider._id, {
-      $inc: { completedJobs: 1 },
-    });
+    await Provider.findByIdAndUpdate(provider._id, { $inc: { completedJobs: 1 } });
 
-    // Notify user service is completed
     const io = req.app.get('io');
     if (io) {
       io.to(`user_${request.user}`).emit('request-status-update', {
@@ -303,13 +281,13 @@ exports.markCompleted = async (req, res) => {
       });
     }
 
-    res.json({ success: true, message: 'Service marked as completed!', data: request });
+    res.json({ success: true, message: 'Service completed!', data: request });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
-// ── GET REQUEST BY ID ─────────────────────────────────────────────────────────
+// ── GET BY ID ─────────────────────────────────────────────────────────────────
 exports.getRequestById = async (req, res) => {
   try {
     const request = await Request.findById(req.params.id)
@@ -323,21 +301,20 @@ exports.getRequestById = async (req, res) => {
   }
 };
 
-// ── CANCEL REQUEST ────────────────────────────────────────────────────────────
+// ── CANCEL ────────────────────────────────────────────────────────────────────
 exports.cancelRequest = async (req, res) => {
   try {
     const request = await Request.findById(req.params.id);
     if (!request) return res.status(404).json({ success: false, message: 'Request not found' });
     if (request.user.toString() !== req.user.id) return res.status(403).json({ success: false, message: 'Not authorized' });
-    if (['completed', 'cancelled'].includes(request.status)) {
+    if (['completed','cancelled'].includes(request.status)) {
       return res.status(400).json({ success: false, message: 'Cannot cancel this request' });
     }
 
     request.status = 'cancelled';
-    request.statusHistory.push({ status: 'cancelled', message: req.body.reason || 'Cancelled by user' });
+    pushStatus(request, 'cancelled', req.body.reason || 'Cancelled by user');
     await request.save();
 
-    // Notify provider if assigned
     if (request.assignedProvider) {
       const io = req.app.get('io');
       if (io) {
@@ -354,10 +331,10 @@ exports.cancelRequest = async (req, res) => {
   }
 };
 
-// ── SEARCH REQUESTS ───────────────────────────────────────────────────────────
+// ── SEARCH ────────────────────────────────────────────────────────────────────
 exports.searchRequests = async (req, res) => {
   try {
-    const { q, latitude, longitude, radius = 20 } = req.query;
+    const { q } = req.query;
     const query = { status: 'pending' };
     if (q) query.$or = [
       { title:       { $regex: q, $options: 'i' } },

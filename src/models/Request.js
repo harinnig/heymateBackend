@@ -2,86 +2,59 @@
 const mongoose = require('mongoose');
 
 const offerSchema = new mongoose.Schema({
-  provider:    { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  price:       { type: Number, required: true },
-  message:     { type: String, default: '' },
-  eta:         { type: String, default: '' },   // e.g. "30 mins"
-  status:      { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
-  createdAt:   { type: Date, default: Date.now },
+  provider:   { type: mongoose.Schema.Types.ObjectId, ref: 'Provider', required: true },
+  price:      { type: Number, required: true },
+  message:    { type: String },
+  status:     { type: String, enum: ['pending','accepted','rejected'], default: 'pending' },
+  createdAt:  { type: Date, default: Date.now },
+});
+
+const statusHistorySchema = new mongoose.Schema({
+  status:    { type: String },
+  message:   { type: String },
+  timestamp: { type: Date, default: Date.now },
 });
 
 const requestSchema = new mongoose.Schema({
-  user: {
-    type:     mongoose.Schema.Types.ObjectId,
-    ref:      'User',
-    required: true,
-  },
-  title: {
-    type:     String,
-    required: [true, 'Title is required'],
-    trim:     true,
-  },
-  description: {
-    type:    String,
-    default: '',
-  },
-  category: {
-    type:     String,
-    required: [true, 'Category is required'],
-    enum: [
-      'Plumbing', 'Electrical', 'Cleaning', 'Painting',
-      'Carpentry', 'AC Repair', 'Car Wash', 'Moving',
-      'Salon', 'Pet Care', 'Tutoring', 'Food Delivery', 'Other',
-    ],
-  },
-  budget: {
-    type:    Number,
-    default: null,
-  },
+  user:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  title:       { type: String, required: true },
+  description: { type: String, required: true },
+  category:    { type: String, required: true },
+  budget:      { type: Number, default: 0 },
+  images:      [String],
+
   status: {
     type:    String,
-    enum:    ['pending', 'active', 'completed', 'cancelled'],
+    enum:    ['pending','assigned','payment_pending','active','completed','cancelled'],
     default: 'pending',
   },
 
-  // ── Location ────────────────────────────────────────────────────────────────
   location: {
-    type: {
-      type:    String,
-      enum:    ['Point'],
-      default: 'Point',
-    },
-    coordinates: {
-      type:    [Number],   // [longitude, latitude]
-      default: [0, 0],
-    },
-    address: { type: String, default: '' },
+    type:        { type: String, default: 'Point' },
+    coordinates: { type: [Number], default: [0, 0] },
+    address:     { type: String, default: '' },
   },
 
-  // ── Assigned provider (after offer accepted) ────────────────────────────────
-  assignedProvider: {
-    type:    mongoose.Schema.Types.ObjectId,
-    ref:     'User',
-    default: null,
-  },
+  offers:           { type: [offerSchema], default: [] },
+  acceptedOffer:    { type: mongoose.Schema.Types.ObjectId },
+  assignedProvider: { type: mongoose.Schema.Types.ObjectId, ref: 'Provider' },
 
-  // ── Offers from providers ───────────────────────────────────────────────────
-  offers: [offerSchema],
+  paymentStatus: { type: String, enum: ['unpaid','paid','refunded'], default: 'unpaid' },
+  paymentId:     { type: String },
+  finalAmount:   { type: Number, default: 0 },
 
-  // ── Search radius in km ─────────────────────────────────────────────────────
-  searchRadius: {
-    type:    Number,
-    default: 10,  // 10km
-  },
+  rejectedBy:        { type: [mongoose.Schema.Types.ObjectId], default: [] },
+  notifiedProviders: { type: [mongoose.Schema.Types.ObjectId], default: [] },
 
-  completedAt: { type: Date, default: null },
-  cancelledAt: { type: Date, default: null },
-  cancelReason:{ type: String, default: '' },
+  // ── Default empty array prevents "push of undefined" ──
+  statusHistory: { type: [statusHistorySchema], default: [] },
+
+  completedAt: { type: Date },
 
 }, { timestamps: true });
 
-// Geo index for nearby queries
 requestSchema.index({ location: '2dsphere' });
 requestSchema.index({ user: 1, status: 1 });
+requestSchema.index({ assignedProvider: 1, status: 1 });
 
-module.exports = mongoose.model('Request', requestSchema);
+module.exports = mongoose.models.Request || mongoose.model('Request', requestSchema);
