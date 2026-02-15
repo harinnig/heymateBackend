@@ -1,7 +1,7 @@
 // backend/src/controllers/nearbyController.js
 const axios = require('axios');
 
-const GOOGLE_API_KEY = 'AIzaSyBoBIhJU0kW210QtcHSPXfkn7xvjJ1I8gw';
+const GOOGLE_API_KEY = 'AIzaSyD7Sok4RtWxOAIXv4xGIQTyfzKy3vxcTyo';
 
 const CATEGORY_SEARCH = {
   'Plumbing':      'plumber',
