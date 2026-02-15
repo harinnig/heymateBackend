@@ -34,6 +34,7 @@ app.use('/api/auth',      require('./routes/auth'));
 app.use('/api/providers', require('./routes/providers'));
 app.use('/api/requests',  require('./routes/requests'));
 app.use('/api/reviews',   require('./routes/reviews'));
+app.use('/api/nearby',    require('./routes/nearby'));
 app.use('/api/payments',  require('./routes/payments'));
 
 // ── Health Check ──────────────────────────────────────────────────────────────
