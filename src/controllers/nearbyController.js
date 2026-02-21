@@ -1,287 +1,310 @@
-// backend/src/controllers/nearbyController.js - MAX 10 MINUTES TRAVEL
-const axios = require('axios');
+// frontend/src/components/NearbyShopsTab.js - 100KM MAX
+import React, { useState, useEffect } from 'react';
+import {
+  View, Text, FlatList, TouchableOpacity, ActivityIndicator,
+  Image, Linking, StyleSheet, Alert,
+} from 'react-native';
+import { fetchNearbyShops } from '../utils/googlePlaces';
 
-const GOOGLE_API_KEY = process.env.GOOGLE_PLACE_API || process.env.GOOGLE_API_KEY || '';
+const NearbyShopsTab = ({ category, userLocation, theme }) => {
+  const [shops, setShops]       = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+  const [radius, setRadius]     = useState(5); // Start with 5km
 
-const CATEGORY_SEARCH = {
-  'Plumbing':       'plumber',
-  'Electrical':     'electrician',
-  'Cleaning':       'cleaning service',
-  'Painting':       'painter',
-  'Carpentry':      'carpenter',
-  'AC Repair':      'AC repair air conditioner',
-  'Car Wash':       'car wash',
-  'Moving':         'packers movers',
-  'Salon':          'salon beauty parlour',
-  'Pet Care':       'pet shop veterinary',
-  'Tutoring':       'tuition coaching',
-  'Food Delivery':  'restaurant food delivery',
-};
-
-// ── Calculate distance ────────────────────────────────────────────────────────
-const calculateDistance = (lat1, lon1, lat2, lon2) => {
-  const R = 6371;
-  const dLat = (lat2 - lat1) * Math.PI / 180;
-  const dLon = (lon2 - lon1) * Math.PI / 180;
-  
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  const distanceKm = R * c;
-  
-  return distanceKm;
-};
-
-// ── Estimate travel time (10 min max) ────────────────────────────────────────
-const estimateTravelTime = (distanceKm) => {
-  // Walking: 5 km/h
-  // City driving: 15-20 km/h average
-  
-  // For very short distances, assume walking
-  if (distanceKm < 0.5) {
-    const walkMinutes = Math.round((distanceKm / 5) * 60);
-    return walkMinutes < 5 ? '5 min walk' : `${walkMinutes} min walk`;
-  }
-  
-  // For longer, assume driving in city traffic (15 km/h avg)
-  const avgSpeed = 15; // km/h (realistic for Indian city traffic)
-  const timeHours = distanceKm / avgSpeed;
-  const timeMinutes = Math.round(timeHours * 60);
-  
-  if (timeMinutes < 5) {
-    return '5 min';
-  } else {
-    return `${timeMinutes} min`;
-  }
-};
-
-// ── Format distance ───────────────────────────────────────────────────────────
-const formatDistance = (distanceKm) => {
-  if (distanceKm < 1) {
-    return `${Math.round(distanceKm * 1000)}m`;
-  } else {
-    return `${distanceKm.toFixed(1)}km`;
-  }
-};
-
-// ── Google Places API ─────────────────────────────────────────────────────────
-const fetchGooglePlaces = async (lat, lon, category, radius) => {
-  try {
-    if (!GOOGLE_API_KEY) {
-      console.log('⚠️  GOOGLE_PLACE_API not set');
-      return null;
+  useEffect(() => {
+    if (userLocation?.latitude && userLocation?.longitude) {
+      loadShops();
+    } else {
+      setLoading(false);
+      setError('Location not available');
     }
+  }, [category, userLocation, radius]);
 
-    const keyword = CATEGORY_SEARCH[category] || category;
-    const url = 'https://places.googleapis.com/v1/places:searchText';
-
-    console.log(`🔍 Google Places: "${keyword}" at (${lat}, ${lon}) within ${radius}m`);
-
-    const response = await axios.post(url, {
-      textQuery: `${keyword} near me`,
-      locationBias: {
-        circle: {
-          center: { latitude: parseFloat(lat), longitude: parseFloat(lon) },
-          radius: parseInt(radius),
-        },
-      },
-      maxResultCount: 20,
-    }, {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': GOOGLE_API_KEY,
-        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.currentOpeningHours,places.photos,places.id,places.internationalPhoneNumber',
-      },
-      timeout: 10000
-    });
-
-    if (response.data.places && response.data.places.length > 0) {
-      console.log(`✅ Google Places: Found ${response.data.places.length} results`);
+  const loadShops = async () => {
+    try {
+      setLoading(true);
+      setError(null);
       
-      const shops = response.data.places.map(place => {
-        const shopLat = place.location?.latitude;
-        const shopLon = place.location?.longitude;
-        const distKm = calculateDistance(lat, lon, shopLat, shopLon);
-        const travelTime = estimateTravelTime(distKm);
-        
-        return {
-          id: place.id,
-          name: place.displayName?.text || 'Unknown',
-          address: place.formattedAddress || '',
-          lat: shopLat,
-          lon: shopLon,
-          rating: place.rating || 0,
-          reviews: place.userRatingCount || 0,
-          isOpen: place.currentOpeningHours?.openNow,
-          phone: place.internationalPhoneNumber || null,
-          distance: formatDistance(distKm),
-          distanceKm: distKm,
-          travelTime: travelTime,
-          source: 'google',
-          photoUrl: place.photos?.[0]?.name 
-            ? `https://places.googleapis.com/v1/${place.photos[0].name}/media?maxWidthPx=400&key=${GOOGLE_API_KEY}`
-            : null,
-        };
-      });
-
-      // ✅ FILTER: Max 10 minutes travel (about 2.5km at 15km/h)
-      const filtered = shops.filter(shop => {
-        const timeMinutes = parseInt(shop.travelTime);
-        return timeMinutes <= 10; // Max 10 minutes
-      });
-
-      // Sort by distance (nearest first)
-      filtered.sort((a, b) => a.distanceKm - b.distanceKm);
-
-      console.log(`✅ After 10min filter: ${filtered.length} shops (from ${shops.length} total)`);
-      return filtered;
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('❌ Google Places error:', error.message);
-    return null;
-  }
-};
-
-// ── OpenStreetMap Fallback ───────────────────────────────────────────────────
-const fetchOpenStreetMap = async (lat, lon, category, radius) => {
-  try {
-    console.log(`🔍 OpenStreetMap: Searching within ${radius}m`);
-    
-    const query = `[out:json][timeout:15];
-      (
-        node["shop"](around:${radius},${lat},${lon});
-        node["amenity"](around:${radius},${lat},${lon});
-        node["craft"](around:${radius},${lat},${lon});
+      // Try with current radius first
+      let result = await fetchNearbyShops(
+        userLocation.latitude,
+        userLocation.longitude,
+        category,
+        radius * 1000
       );
-      out body 20;`;
-
-    const response = await axios.post(
-      'https://overpass-api.de/api/interpreter',
-      query,
-      { headers: { 'Content-Type': 'text/plain' }, timeout: 10000 }
-    );
-
-    if (response.data.elements && response.data.elements.length > 0) {
-      console.log(`✅ OpenStreetMap: Found ${response.data.elements.length} results`);
       
-      const shops = response.data.elements.map(el => {
-        const distKm = calculateDistance(lat, lon, el.lat, el.lon);
-        const travelTime = estimateTravelTime(distKm);
+      // If no results and radius < 100km, try expanding
+      if ((!result.shops || result.shops.length === 0) && radius < 100) {
+        console.log(`No shops at ${radius}km, trying wider search...`);
         
-        return {
-          id: el.id.toString(),
-          name: el.tags?.name || 'Local Shop',
-          address: el.tags?.['addr:full'] || el.tags?.['addr:street'] || '',
-          lat: el.lat,
-          lon: el.lon,
-          rating: 0,
-          reviews: 0,
-          isOpen: undefined,
-          phone: el.tags?.phone || null,
-          distance: formatDistance(distKm),
-          distanceKm: distKm,
-          travelTime: travelTime,
-          source: 'osm',
-        };
-      });
-
-      const filtered = shops.filter(shop => {
-        const timeMinutes = parseInt(shop.travelTime);
-        return timeMinutes <= 10;
-      });
-
-      filtered.sort((a, b) => a.distanceKm - b.distanceKm);
-      return filtered;
-    }
-    
-    return null;
-  } catch (error) {
-    console.error('❌ OpenStreetMap error:', error.message);
-    return null;
-  }
-};
-
-// ── MAIN CONTROLLER ───────────────────────────────────────────────────────────
-exports.getNearbyShops = async (req, res) => {
-  try {
-    const { latitude, longitude, category, radius = 3000 } = req.query; // Default 3km (10min max)
-
-    if (!latitude || !longitude || !category) {
-      return res.status(400).json({
-        success: false,
-        message: 'latitude, longitude, and category are required',
-      });
-    }
-
-    const lat = parseFloat(latitude);
-    const lon = parseFloat(longitude);
-    const searchRadius = Math.min(parseInt(radius), 3000); // Cap at 3km for 10min
-
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('🔍 NEARBY SHOPS REQUEST (10 MIN MAX)');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`📍 User GPS: (${lat}, ${lon})`);
-    console.log(`📂 Category: ${category}`);
-    console.log(`📏 Search Radius: ${searchRadius}m (${(searchRadius/1000).toFixed(1)}km)`);
-    console.log(`⏱️  Max Travel: 10 minutes`);
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
-
-    let shops = null;
-
-    // Try Google Places first
-    shops = await fetchGooglePlaces(lat, lon, category, searchRadius);
-
-    // Fallback to OpenStreetMap
-    if (!shops || shops.length === 0) {
-      console.log('⚠️  No Google results within 10min, trying OpenStreetMap...\n');
-      shops = await fetchOpenStreetMap(lat, lon, category, searchRadius);
-    }
-
-    // If still no results, try wider search (5km) but still filter to 10min
-    if (!shops || shops.length === 0) {
-      console.log('⚠️  Expanding search to 5km (still max 10min)...\n');
-      shops = await fetchGooglePlaces(lat, lon, category, 5000);
-      
-      if (!shops || shops.length === 0) {
-        shops = await fetchOpenStreetMap(lat, lon, category, 5000);
+        // Try 10km
+        if (radius < 10) {
+          result = await fetchNearbyShops(
+            userLocation.latitude,
+            userLocation.longitude,
+            category,
+            10000
+          );
+          if (result.shops && result.shops.length > 0) {
+            setRadius(10);
+          }
+        }
+        
+        // Still nothing? Try 20km
+        if ((!result.shops || result.shops.length === 0) && radius < 20) {
+          result = await fetchNearbyShops(
+            userLocation.latitude,
+            userLocation.longitude,
+            category,
+            20000
+          );
+          if (result.shops && result.shops.length > 0) {
+            setRadius(20);
+          }
+        }
+        
+        // Still nothing? Try 50km
+        if ((!result.shops || result.shops.length === 0) && radius < 50) {
+          result = await fetchNearbyShops(
+            userLocation.latitude,
+            userLocation.longitude,
+            category,
+            50000
+          );
+          if (result.shops && result.shops.length > 0) {
+            setRadius(50);
+          }
+        }
+        
+        // Last resort: 100km
+        if ((!result.shops || result.shops.length === 0) && radius < 100) {
+          result = await fetchNearbyShops(
+            userLocation.latitude,
+            userLocation.longitude,
+            category,
+            100000
+          );
+          if (result.shops && result.shops.length > 0) {
+            setRadius(100);
+          }
+        }
       }
+      
+      if (result.success) {
+        // Filter to max 100km
+        const filtered = (result.shops || []).filter(shop => {
+          const distKm = parseFloat(shop.distance);
+          return distKm <= 100;
+        });
+        setShops(filtered);
+      } else {
+        setError(result.error || 'Failed to fetch shops');
+      }
+    } catch (e) {
+      setError('Failed to load shops');
+    } finally {
+      setLoading(false);
     }
+  };
 
-    const finalShops = shops || [];
-    
-    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log('✅ SEARCH COMPLETE');
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-    console.log(`📊 Results: ${finalShops.length} shops (all within 10 min)`);
-    if (finalShops.length > 0) {
-      console.log(`📍 Nearest: ${finalShops[0].name}`);
-      console.log(`   Distance: ${finalShops[0].distance}`);
-      console.log(`   Travel: ${finalShops[0].travelTime}`);
-      console.log(`   Source: ${finalShops[0].source}`);
+  const openInMaps = (shop) => {
+    const url = shop.directionsUrl || shop.mapsUrl;
+    if (url) {
+      Linking.openURL(url).catch(() =>
+        Alert.alert('Error', 'Could not open Google Maps')
+      );
     }
-    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+  };
 
-    res.json({
-      success: true,
-      count: finalShops.length,
-      data: finalShops,
-      userLocation: { latitude: lat, longitude: lon },
-      searchRadius: searchRadius,
-      category: category,
-      maxTravelTime: '10 minutes'
-    });
+  const renderStars = (rating) => {
+    if (!rating) return null;
+    const stars = Math.round(rating);
+    return '⭐'.repeat(Math.min(stars, 5));
+  };
 
-  } catch (error) {
-    console.error('\n❌ ERROR:', error.message);
-    res.status(500).json({ 
-      success: false, 
-      message: error.message,
-      data: []
-    });
+  const renderShop = ({ item }) => (
+    <TouchableOpacity
+      style={[styles.shopCard, { backgroundColor: theme?.cardBackground || '#fff' }]}
+      onPress={() => openInMaps(item)}
+      activeOpacity={0.85}
+    >
+      {/* Photo */}
+      <View style={styles.shopImageWrap}>
+        {item.photoUrl ? (
+          <Image
+            source={{ uri: item.photoUrl }}
+            style={styles.shopImage}
+            resizeMode="cover"
+          />
+        ) : (
+          <View style={[styles.shopImagePlaceholder, { backgroundColor: '#dbeafe' }]}>
+            <Text style={{ fontSize: 32 }}>🏪</Text>
+          </View>
+        )}
+        {/* Open/Closed badge */}
+        {item.isOpen !== undefined && (
+          <View style={[styles.openBadge, { backgroundColor: item.isOpen ? '#dcfce7' : '#fee2e2' }]}>
+            <Text style={{ fontSize: 10, fontWeight: '700', color: item.isOpen ? '#16a34a' : '#dc2626' }}>
+              {item.isOpen ? '● OPEN' : '● CLOSED'}
+            </Text>
+          </View>
+        )}
+      </View>
+
+      {/* Info */}
+      <View style={styles.shopInfo}>
+        <Text style={[styles.shopName, { color: theme?.textPrimary || '#1f2937' }]} numberOfLines={1}>
+          {item.name}
+        </Text>
+        <Text style={[styles.shopAddr, { color: theme?.textSecondary || '#6b7280' }]} numberOfLines={2}>
+          📍 {item.address}
+        </Text>
+
+        {/* Rating + Distance */}
+        <View style={styles.shopMeta}>
+          {item.rating && (
+            <View style={styles.ratingWrap}>
+              <Text style={styles.ratingStars}>{renderStars(item.rating)}</Text>
+              <Text style={styles.ratingText}>{item.rating} ({item.totalRatings})</Text>
+            </View>
+          )}
+          {item.distance && (
+            <View style={styles.distWrap}>
+              <Text style={styles.distText}>📏 {item.distance}</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Actions */}
+        <View style={styles.shopActions}>
+          <TouchableOpacity
+            style={styles.dirBtn}
+            onPress={() => openInMaps(item)}
+          >
+            <Text style={styles.dirBtnTxt}>🗺️ Directions</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.callBtn, { backgroundColor: '#eff6ff' }]}
+            onPress={() => Linking.openURL(`https://www.google.com/maps/place/?q=place_id:${item.placeId}`)}
+          >
+            <Text style={[styles.callBtnTxt, { color: '#2563eb' }]}>View on Maps</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+
+  // ── Radius Selector (MAX 100KM) ──
+  const RadiusSelector = () => (
+    <View style={styles.radiusRow}>
+      <Text style={[styles.radiusLabel, { color: theme?.textSecondary || '#6b7280' }]}>Search radius:</Text>
+      {[5, 10, 20, 50, 100].map(r => (
+        <TouchableOpacity
+          key={r}
+          style={[styles.radiusBtn, { backgroundColor: radius === r ? '#2563eb' : (theme?.cardBackground || '#f1f5f9') }]}
+          onPress={() => setRadius(r)}
+        >
+          <Text style={[styles.radiusBtnTxt, { color: radius === r ? '#fff' : (theme?.textPrimary || '#374151') }]}>
+            {r}km
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color="#2563eb" />
+        <Text style={{ color: theme?.textSecondary || '#6b7280', marginTop: 12 }}>
+          Searching nearby {category} shops...
+        </Text>
+      </View>
+    );
   }
+
+  if (error) {
+    return (
+      <View style={styles.center}>
+        <Text style={{ fontSize: 50 }}>⚠️</Text>
+        <Text style={{ fontSize: 16, fontWeight: 'bold', color: theme?.textPrimary || '#1f2937', marginTop: 12 }}>
+          {error}
+        </Text>
+        <TouchableOpacity style={styles.retryBtn} onPress={loadShops}>
+          <Text style={styles.retryBtnTxt}>🔄 Retry</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (shops.length === 0) {
+    return (
+      <View>
+        <RadiusSelector />
+        <View style={styles.center}>
+          <Text style={{ fontSize: 60 }}>🔍</Text>
+          <Text style={[styles.emptyTitle, { color: theme?.textPrimary || '#1f2937' }]}>
+            No shops found nearby
+          </Text>
+          <Text style={[styles.emptySub, { color: theme?.textSecondary || '#6b7280' }]}>
+            No {category} shops found within {radius}km
+          </Text>
+          <Text style={{ fontSize: 12, color: '#9ca3af', marginTop: 8, textAlign: 'center', paddingHorizontal: 20 }}>
+            Try increasing the search radius (max 100km)
+          </Text>
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={{ flex: 1 }}>
+      <RadiusSelector />
+      <Text style={[styles.resultCount, { color: theme?.textSecondary || '#6b7280' }]}>
+        {shops.length} {category} shops found within {radius}km (max 100km)
+      </Text>
+      <FlatList
+        data={shops}
+        keyExtractor={item => item.id}
+        renderItem={renderShop}
+        contentContainerStyle={{ paddingBottom: 20 }}
+        showsVerticalScrollIndicator={false}
+      />
+    </View>
+  );
 };
+
+export default NearbyShopsTab;
+
+const styles = StyleSheet.create({
+  center:             { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
+  radiusRow:          { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10, gap: 6, flexWrap: 'wrap' },
+  radiusLabel:        { fontSize: 13, fontWeight: '600', marginRight: 4 },
+  radiusBtn:          { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16 },
+  radiusBtnTxt:       { fontSize: 12, fontWeight: '700' },
+  resultCount:        { fontSize: 12, paddingHorizontal: 16, marginBottom: 8 },
+  shopCard:           { borderRadius: 16, marginHorizontal: 16, marginBottom: 14, elevation: 3, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.08, shadowRadius: 6, overflow: 'hidden' },
+  shopImageWrap:      { position: 'relative' },
+  shopImage:          { width: '100%', height: 160 },
+  shopImagePlaceholder:{ width: '100%', height: 120, justifyContent: 'center', alignItems: 'center' },
+  openBadge:          { position: 'absolute', top: 10, right: 10, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
+  shopInfo:           { padding: 14 },
+  shopName:           { fontSize: 16, fontWeight: '700', marginBottom: 4 },
+  shopAddr:           { fontSize: 13, lineHeight: 18, marginBottom: 8 },
+  shopMeta:           { flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 10 },
+  ratingWrap:         { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  ratingStars:        { fontSize: 12 },
+  ratingText:         { fontSize: 12, color: '#6b7280' },
+  distWrap:           { backgroundColor: '#f1f5f9', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
+  distText:           { fontSize: 12, color: '#374151', fontWeight: '600' },
+  shopActions:        { flexDirection: 'row', gap: 10 },
+  dirBtn:             { flex: 1, backgroundColor: '#2563eb', borderRadius: 10, padding: 10, alignItems: 'center' },
+  dirBtnTxt:          { color: '#fff', fontWeight: '700', fontSize: 13 },
+  callBtn:            { flex: 1, borderRadius: 10, padding: 10, alignItems: 'center' },
+  callBtnTxt:         { fontWeight: '700', fontSize: 13 },
+  emptyTitle:         { fontSize: 18, fontWeight: 'bold', marginTop: 12 },
+  emptySub:           { fontSize: 14, textAlign: 'center', marginTop: 6, color: '#6b7280' },
+  retryBtn:           { backgroundColor: '#2563eb', borderRadius: 12, paddingHorizontal: 24, paddingVertical: 12, marginTop: 16 },
+  retryBtnTxt:        { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+});
